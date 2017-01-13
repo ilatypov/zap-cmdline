@@ -28,6 +28,7 @@ from acsrf import acsrf
 from ascan import ascan
 from ajaxSpider import ajaxSpider
 from authentication import authentication
+from authorization import authorization
 from autoupdate import autoupdate
 from brk import brk
 from context import context
@@ -38,11 +39,13 @@ from importLogFiles import importLogFiles
 from params import params
 from pnh import pnh
 from pscan import pscan
+from reveal import reveal
 from script import script
 from search import search
 from selenium import selenium
 from sessionManagement import sessionManagement
 from spider import spider
+from stats import stats
 from users import users
 
 class ZapError(Exception):
@@ -79,6 +82,7 @@ class ZAPv2(object):
         self.ajaxSpider = ajaxSpider(self)
         self.ascan = ascan(self)
         self.authentication = authentication(self)
+        self.authorization = authorization(self)
         self.autoupdate = autoupdate(self)
         self.brk = brk(self)
         self.context = context(self)
@@ -89,11 +93,13 @@ class ZAPv2(object):
         self.params = params(self)
         self.pnh = pnh(self)
         self.pscan = pscan(self)
+        self.reveal = reveal(self)
         self.script = script(self)
         self.search = search(self)
         self.selenium = selenium(self)
         self.sessionManagement = sessionManagement(self)
         self.spider = spider(self)
+        self.stats = stats(self)
         self.users = users(self)
 
     def _expect_ok(self, json_data):

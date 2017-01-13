@@ -2,7 +2,7 @@
 #
 # ZAP is an HTTP/HTTPS proxy for assessing web application security.
 #
-# Copyright 2015 the ZAP development team
+# Copyright 2016 the ZAP development team
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -80,16 +80,28 @@ class context(object):
         """
         return next(self.zap._request(self.zap.base + 'context/action/includeInContext/', {'contextName' : contextname, 'regex' : regex, 'apikey' : apikey}).itervalues())
 
-    def new_context(self, contextname='', apikey=''):
+    def new_context(self, contextname, apikey=''):
         """
-        Creates a new context in the current session
+        Creates a new context with the given name in the current session
         """
         return next(self.zap._request(self.zap.base + 'context/action/newContext/', {'contextName' : contextname, 'apikey' : apikey}).itervalues())
 
+    def remove_context(self, contextname, apikey=''):
+        """
+        Removes a context in the current session
+        """
+        return next(self.zap._request(self.zap.base + 'context/action/removeContext/', {'contextName' : contextname, 'apikey' : apikey}).itervalues())
+
     def export_context(self, contextname, contextfile, apikey=''):
+        """
+        Exports the context with the given name to a file. If a relative file path is specified it will be resolved against the "contexts" directory in ZAP "home" dir.
+        """
         return next(self.zap._request(self.zap.base + 'context/action/exportContext/', {'contextName' : contextname, 'contextFile' : contextfile, 'apikey' : apikey}).itervalues())
 
     def import_context(self, contextfile, apikey=''):
+        """
+        Imports a context from a file. If a relative file path is specified it will be resolved against the "contexts" directory in ZAP "home" dir.
+        """
         return next(self.zap._request(self.zap.base + 'context/action/importContext/', {'contextFile' : contextfile, 'apikey' : apikey}).itervalues())
 
     def include_context_technologies(self, contextname, technologynames, apikey=''):
