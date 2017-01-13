@@ -97,31 +97,39 @@ def utclogging_config(level):
     python2_logging_handler_formatter_tz_fix()
 
 
+def cut(s, w):
+    s = str(s)
+    if len(s) > (w - 3):
+        s = s[:w - 3] + "..."
+    return s
+
+
 def pentest(owaspzap, target, httpUsername, httpPassword):
     # Configuration
     #browser='firefox'
-    browser='phantomjs'
+    browser="phantomjs"
 
     phantomJSPath = "c:/selenium-drivers/phantomjs.exe"
-    log.info('Using PhantomJS binary path ' + phantomJSPath)
+    log.info("Using PhantomJS binary path " + phantomJSPath)
 
     # Start zap.
-    log.info('Starting ZAP as ' + owaspzap + '\zap.bat')
-    # subprocess.Popen(['c:/cygwin64/bin/bash.exe', 'c:/Program Files (x86)/OWASP/Zed Attack Proxy/zap.sh','-daemon','-config','api.disablekey=true','-config','ajaxSpider.browserId='+browser,'-config','selenium.phantomJsBinary=' + phantomJSPath])
-    subprocess.Popen([owaspzap + '\zap.bat',
-        '-daemon',
-        '-config', 'api.disablekey=true',
-        '-config', 'ajaxSpider.browserId=' + browser,
-        '-config', 'selenium.phantomJsBinary=' + phantomJSPath,
-        '-host', '127.0.0.1',
-        '-port', '8090',])
+    zapProxyHost = '127.0.0.1'
+    zapProxyPort = 8090
+    zapProxy = "%s:%d" % (zapProxyHost, zapProxyPort)
+    log.info("Starting ZAP proxying on %s" % (zapProxy,))
+    subprocess.Popen(["cmd.exe", "/c", owaspzap + "\\zap.bat",
+        "-daemon",
+        "-config", "api.disablekey=true",
+        "-config", "ajaxSpider.browserId=" + browser,
+        "-config", "selenium.phantomJsBinary=" + phantomJSPath,
+        "-host", zapProxyHost,
+        "-port", str(zapProxyPort),])
 
-    log.info('Waiting for ZAP to load.')
+    log.info("Waiting for ZAP to load.")
 
     # Wait until the ZAP API is reachable.
-    version = ''
-    zap = ZAPv2(proxies={'http': 'http://127.0.0.1:8090', 'https': 'http://127.0.0.1:8090'})
-    while (version == ''):
+    zap = ZAPv2(proxies={"http": "http://%s" % (zapProxy,), "https": "http://%s" % (zapProxy,)})
+    while True:
         try:
             version = zap.core.version
         except:
@@ -129,40 +137,83 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
             time.sleep(1)
         else:
             # Wait a bit more for ZAP to fully start.
-            log.info('Got ZAP version ' + version)
-            time.sleep(1)
+            log.info('Connected to ZAP version ' + version)
+            break
+    
+    time.sleep(1)
 
-    # Ready for business ;-)
-    log.info('ZAP version ' + version + ' is running.')
+    # https://groups.google.com/d/msg/zaproxy-users/BrVE0Zp_ug4/8PST56_-5nQJ
+    # https://janitha000.wordpress.com/2015/09/12/owasp-zap-authentication-and-command-line-tool/
+    log.info("Setting a context")
+    ctxname = "zapcmd"
+    cid = zap.context.new_context(ctxname)
+    zap.context.include_in_context(ctxname, target + ".*")
 
-    # Connect to the target.
+    log.info("Configuring form authentication")
+    zap.authentication.set_authentication_method(cid, "formBasedAuthentication", 
+            authmethodconfigparams = "loginUrl=" + target + 
+                "/j_spring_security_check&loginRequestData=username%3D%7B%25username%25%7D%26password%3D%7B%25password%25%7D")
+    zap.authentication.set_logged_in_indicator(cid, "href=\"j_spring_security_logout\"")
+    # zap.authentication.set_logged_out_indicator(cid, "Location: http\\.*/WebGoat/login\\.mvc|\\Qhref=\"login\\.mvc\"\\E|onload=\"document.loginForm.username.focus();\"")
+    zap.authentication.set_logged_out_indicator(cid, "onload=\"document.loginForm.username.focus();\"")
+    
+    userid = zap.users.new_user(cid, "guest")
+    zap.users.set_user_name(cid, userid, "guest")
+    zap.users.set_authentication_credentials(cid, userid, "username=guest&password=guest")
+    zap.users.set_user_enabled(cid, userid, True)
+
+    zap.forcedUser.set_forced_user(cid, userid)
+    zap.forcedUser.set_forced_user_mode_enabled(True)
+
+    log.info("Created context " + str(cid) + ": " + str(zap.context.context(ctxname)))
+    log.info("Auth method: " + str(zap.authentication.get_authentication_method(cid)))
+
     log.info('Accessing target %s' % target)
-    htmlResult = zap.urlopenWithPassword(target, httpUsername, httpPassword)
-    log.info('Received HTML: ' + htmlResult)
+    # htmlResult = zap.urlopenWithPassword(target, httpUsername, httpPassword)
+    htmlResult = zap.core.access_url(target + "/welcome.mvc", followredirects=True)
+    log.info("Received HTML: " + ", ".join(cut(r["requestHeader"], 70).replace("\n", "\\n").replace("\r", "\\r") 
+        for r in htmlResult))
 
     # Give the sites tree a chance to get updated
     time.sleep(2)
 
     # Spider the target.
+    for spiderscan in zap.spider.scans:
+        log.info("Spider scan: " + str(spiderscan))
+
     log.info('Spidering target %s' % target)
-    zap.spider.scan(target)
+    scanid = zap.spider.scan_as_user(cid, userid, recurse=True, subtreeonly=True)
+    log.info("Scan ID: " + str(scanid))
     time.sleep(2)
-    while (int(zap.spider.status()) < 100):
-        log.info('Spider progress %: ' + zap.spider.status())
+
+    while True:
+        status = zap.spider.status(scanid)
+        log.info("Spider progress: " + status)
+        if status == "100":
+            break
         time.sleep(2)
 
-    log.info('Spider completed')
+    log.info("Spider completed")
     # Give the spider some time to finish.
     time.sleep(2)
 
+    for spiderscan in zap.spider.scans:
+        log.info("Spider scan: " + str(spiderscan))
 
-    # Start the AJAX spider.
-    log.info('AJAX spidering target %s' % target)
+    for result in zap.spider.results(scanid):
+        log.info("Spider result: " + str(result))
+
+
+    # Start the AJAX spider.  TODO: use form authentication.
+    log.info("AJAX %s spidering target %s" % (zap.ajaxSpider.option_browser_id, target,))
     zap.ajaxSpider.scan(target)
 
     # Wait for AJAX spider to complete.
-    while (zap.ajaxSpider.status != 'stopped'):
-        log.info('AJAX spider ' + zap.ajaxSpider.status + ', ' + zap.ajaxSpider.number_of_results + ' results.')
+    while True:
+        status = zap.ajaxSpider.status
+        log.info('AJAX spider ' + status + ', number of results: ' + zap.ajaxSpider.number_of_results)
+        if status == 'stopped':
+            break
         time.sleep(1)
 
     log.info('AJAX Spider completed')
@@ -170,22 +221,31 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
     time.sleep(3)
 
     for result in zap.ajaxSpider.results():
-        log.info("AJAX result: " + str(result))
+        bDetail = result["requestBody"]
+        if len(bDetail) > 0:
+            bDetail = " (%s)" % (cut(bDetail, 20))
+        log.info("AJAX result: " + cut(result["requestHeader"], 70) + bDetail)
 
     log.info('Scanning target %s' % target)
-    zap.ascan.scan(target)
-    while (int(zap.ascan.status()) < 100):
-        log.info('Scan progress %: ' + zap.ascan.status())
+    ascanid = zap.ascan.scan_as_user(target, cid, userid, recurse=True)
+    log.info("Active scan ID: " + str(ascanid))
+
+    while True:
+        status = zap.ascan.status(ascanid)
+        log.info('Active scan ' + status)
+        if status == "100":
+            break
         time.sleep(5)
 
-    log.info('Scan completed')
+    alerts = zap.core.alerts()
+    log.info('Active scan completed, number of alerts: ' + str(len(alerts)))
 
     # Gather results.
-    results = json.dumps(zap.core.alerts())
+    alerts_jsonrepr = json.dumps(alerts)
 
     # Write the results to disk.
     f = open('report.json', 'w')
-    f.write(str(results))
+    f.write(str(alerts_jsonrepr))
     f.close()
 
     # Shutdown ZAP.
