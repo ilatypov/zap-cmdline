@@ -7,6 +7,7 @@ Spider, AJAX spider and active scan a URL.
 import sys
 import subprocess
 import os
+import signal
 import time
 import json
 import string
@@ -117,7 +118,7 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
     zapProxyPort = 8090
     zapProxy = "%s:%d" % (zapProxyHost, zapProxyPort)
     log.info("Starting ZAP proxying on %s" % (zapProxy,))
-    subprocess.Popen(["cmd.exe", "/c", owaspzap + "\\zap.bat",
+    proc = subprocess.Popen(["cmd.exe", "/c", owaspzap + "\\zap.bat",
         "-daemon",
         "-config", "api.disablekey=true",
         "-config", "ajaxSpider.browserId=" + browser,
@@ -125,132 +126,142 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
         "-host", zapProxyHost,
         "-port", str(zapProxyPort),])
 
-    log.info("Waiting for ZAP to load.")
+    try:
+        log.info("Waiting for ZAP to load.")
 
-    # Wait until the ZAP API is reachable.
-    zap = ZAPv2(proxies={"http": "http://%s" % (zapProxy,), "https": "http://%s" % (zapProxy,)})
-    while True:
-        try:
-            version = zap.core.version
-        except:
-            log.info('ZAP not running yet, waiting.')
-            time.sleep(1)
-        else:
-            # Wait a bit more for ZAP to fully start.
-            log.info('Connected to ZAP version ' + version)
-            break
-    
-    time.sleep(1)
-
-    # https://groups.google.com/d/msg/zaproxy-users/BrVE0Zp_ug4/8PST56_-5nQJ
-    # https://janitha000.wordpress.com/2015/09/12/owasp-zap-authentication-and-command-line-tool/
-    log.info("Setting a context")
-    ctxname = "zapcmd"
-    cid = zap.context.new_context(ctxname)
-    zap.context.include_in_context(ctxname, target + ".*")
-
-    log.info("Configuring form authentication")
-    zap.authentication.set_authentication_method(cid, "formBasedAuthentication", 
-            authmethodconfigparams = "loginUrl=" + target + 
-                "/j_spring_security_check&loginRequestData=username%3D%7B%25username%25%7D%26password%3D%7B%25password%25%7D")
-    zap.authentication.set_logged_in_indicator(cid, "href=\"j_spring_security_logout\"")
-    # zap.authentication.set_logged_out_indicator(cid, "Location: http\\.*/WebGoat/login\\.mvc|\\Qhref=\"login\\.mvc\"\\E|onload=\"document.loginForm.username.focus();\"")
-    zap.authentication.set_logged_out_indicator(cid, "onload=\"document.loginForm.username.focus();\"")
-    
-    userid = zap.users.new_user(cid, "guest")
-    zap.users.set_user_name(cid, userid, "guest")
-    zap.users.set_authentication_credentials(cid, userid, "username=guest&password=guest")
-    zap.users.set_user_enabled(cid, userid, True)
-
-    zap.forcedUser.set_forced_user(cid, userid)
-    zap.forcedUser.set_forced_user_mode_enabled(True)
-
-    log.info("Created context " + str(cid) + ": " + str(zap.context.context(ctxname)))
-    log.info("Auth method: " + str(zap.authentication.get_authentication_method(cid)))
-
-    log.info('Accessing target %s' % target)
-    # htmlResult = zap.urlopenWithPassword(target, httpUsername, httpPassword)
-    htmlResult = zap.core.access_url(target + "/welcome.mvc", followredirects=True)
-    log.info("Received HTML: " + ", ".join(cut(r["requestHeader"], 70).replace("\n", "\\n").replace("\r", "\\r") 
-        for r in htmlResult))
-
-    # Give the sites tree a chance to get updated
-    time.sleep(2)
-
-    # Spider the target.
-    for spiderscan in zap.spider.scans:
-        log.info("Spider scan: " + str(spiderscan))
-
-    log.info('Spidering target %s' % target)
-    scanid = zap.spider.scan_as_user(cid, userid, recurse=True, subtreeonly=True)
-    log.info("Scan ID: " + str(scanid))
-    time.sleep(2)
-
-    while True:
-        status = zap.spider.status(scanid)
-        log.info("Spider progress: " + status)
-        if status == "100":
-            break
-        time.sleep(2)
-
-    log.info("Spider completed")
-    # Give the spider some time to finish.
-    time.sleep(2)
-
-    for spiderscan in zap.spider.scans:
-        log.info("Spider scan: " + str(spiderscan))
-
-    for result in zap.spider.results(scanid):
-        log.info("Spider result: " + str(result))
-
-
-    # Start the AJAX spider.  TODO: use form authentication.
-    log.info("AJAX %s spidering target %s" % (zap.ajaxSpider.option_browser_id, target,))
-    zap.ajaxSpider.scan(target)
-
-    # Wait for AJAX spider to complete.
-    while True:
-        status = zap.ajaxSpider.status
-        log.info('AJAX spider ' + status + ', number of results: ' + zap.ajaxSpider.number_of_results)
-        if status == 'stopped':
-            break
+        # Wait until the ZAP API is reachable.
+        zap = ZAPv2(proxies={"http": "http://%s" % (zapProxy,), "https": "http://%s" % (zapProxy,)})
+        while True:
+            try:
+                version = zap.core.version
+            except:
+                log.info('ZAP not running yet, waiting.')
+                time.sleep(1)
+            else:
+                # Wait a bit more for ZAP to fully start.
+                log.info('Connected to ZAP version ' + version)
+                break
+        
         time.sleep(1)
 
-    log.info('AJAX Spider completed')
-    # Give the AJAX spider some time to finish.
-    time.sleep(3)
+        # https://groups.google.com/d/msg/zaproxy-users/BrVE0Zp_ug4/8PST56_-5nQJ
+        # https://janitha000.wordpress.com/2015/09/12/owasp-zap-authentication-and-command-line-tool/
+        log.info("Setting a context")
+        ctxname = "zapcmd"
+        cid = zap.context.new_context(ctxname)
+        zap.context.include_in_context(ctxname, target + ".*")
 
-    for result in zap.ajaxSpider.results():
-        bDetail = result["requestBody"]
-        if len(bDetail) > 0:
-            bDetail = " (%s)" % (cut(bDetail, 20))
-        log.info("AJAX result: " + cut(result["requestHeader"], 70) + bDetail)
+        log.info("Configuring form authentication")
+        zap.authentication.set_authentication_method(cid, "formBasedAuthentication", 
+                authmethodconfigparams = "loginUrl=" + target + 
+                    "/j_spring_security_check&loginRequestData=username%3D%7B%25username%25%7D%26password%3D%7B%25password%25%7D")
+        zap.authentication.set_logged_in_indicator(cid, "href=\"j_spring_security_logout\"")
+        # zap.authentication.set_logged_out_indicator(cid, "Location: http\\.*/WebGoat/login\\.mvc|\\Qhref=\"login\\.mvc\"\\E|onload=\"document.loginForm.username.focus();\"")
+        zap.authentication.set_logged_out_indicator(cid, "onload=\"document.loginForm.username.focus();\"")
+        
+        userid = zap.users.new_user(cid, "guest")
+        zap.users.set_user_name(cid, userid, "guest")
+        zap.users.set_authentication_credentials(cid, userid, "username=guest&password=guest")
+        zap.users.set_user_enabled(cid, userid, True)
 
-    log.info('Scanning target %s' % target)
-    ascanid = zap.ascan.scan_as_user(target, cid, userid, recurse=True)
-    log.info("Active scan ID: " + str(ascanid))
+        zap.forcedUser.set_forced_user(cid, userid)
+        zap.forcedUser.set_forced_user_mode_enabled(True)
 
-    while True:
-        status = zap.ascan.status(ascanid)
-        log.info('Active scan ' + status)
-        if status == "100":
-            break
-        time.sleep(5)
+        log.info("Created context " + str(cid) + ": " + str(zap.context.context(ctxname)))
+        log.info("Auth method: " + str(zap.authentication.get_authentication_method(cid)))
 
-    alerts = zap.core.alerts()
-    log.info('Active scan completed, number of alerts: ' + str(len(alerts)))
+        log.info('Accessing target %s' % target)
+        # htmlResult = zap.urlopenWithPassword(target, httpUsername, httpPassword)
+        htmlResult = zap.core.access_url(target + "/welcome.mvc", followredirects=True)
+        log.info("Received HTML: " + ", ".join(cut(r["requestHeader"], 70).replace("\n", "\\n").replace("\r", "\\r") 
+            for r in htmlResult))
 
-    # Gather results.
-    alerts_jsonrepr = json.dumps(alerts)
+        # Give the sites tree a chance to get updated
+        time.sleep(2)
 
-    # Write the results to disk.
-    f = open('report.json', 'w')
-    f.write(str(alerts_jsonrepr))
-    f.close()
+        # Spider the target.
+        for spiderscan in zap.spider.scans:
+            log.info("Spider scan: " + str(spiderscan))
 
-    # Shutdown ZAP.
-    zap.core.shutdown()
+        log.info('Spidering target %s' % target)
+        scanid = zap.spider.scan_as_user(cid, userid, recurse=True, subtreeonly=True)
+        try:
+            scanidnum = int(scanid)
+        except ValueError as ex:
+            log.info("Unexpected spider scan ID \"" + scanid + "\"")
+            raise
+        log.info("Spider scan ID: " + str(scanid))
+        time.sleep(2)
 
+        while True:
+            status = zap.spider.status(scanid)
+            log.info("Spider progress: " + status)
+            if status == "100":
+                break
+            time.sleep(2)
+
+        log.info("Spider completed")
+        # Give the spider some time to finish.
+        time.sleep(2)
+
+        for spiderscan in zap.spider.scans:
+            log.info("Spider scan: " + str(spiderscan))
+
+        for result in zap.spider.results(scanid):
+            log.info("Spider result: " + str(result))
+
+
+        # Start the AJAX spider.  TODO: use form authentication.
+        log.info("AJAX %s spidering target %s" % (zap.ajaxSpider.option_browser_id, target,))
+        zap.ajaxSpider.scan(target)
+
+        # Wait for AJAX spider to complete.
+        while True:
+            status = zap.ajaxSpider.status
+            log.info('AJAX spider ' + status + ', number of results: ' + zap.ajaxSpider.number_of_results)
+            if status == 'stopped':
+                break
+            time.sleep(1)
+
+        log.info('AJAX Spider completed')
+        # Give the AJAX spider some time to finish.
+        time.sleep(3)
+
+        for result in zap.ajaxSpider.results():
+            bDetail = result["requestBody"]
+            if len(bDetail) > 0:
+                bDetail = " (%s)" % (cut(bDetail, 20))
+            log.info("AJAX result: " + (cut(result["requestHeader"], 70) + bDetail).encode("utf-8").encode("string_escape"))
+
+        log.info('Scanning target %s' % target)
+        ascanid = zap.ascan.scan_as_user(target, cid, userid, recurse=True)
+        log.info("Active scan ID: " + str(ascanid))
+
+        while True:
+            status = zap.ascan.status(ascanid)
+            log.info('Active scan ' + status)
+            if status == "100":
+                break
+            time.sleep(5)
+
+        alerts = zap.core.alerts()
+        log.info('Active scan completed, number of alerts: ' + str(len(alerts)))
+
+        # Gather results.
+        alerts_jsonrepr = json.dumps(alerts)
+
+        # Write the results to disk.
+        f = open('report.json', 'w')
+        f.write(str(alerts_jsonrepr))
+        f.close()
+
+        # Shutdown ZAP.
+        zap.core.shutdown()
+    finally:
+        log.info("Terminating PID " + str(proc.pid) + " and subprocesses")
+        # The Cygwin build of Python has no signal.CTRL_C_EVENT
+        # os.kill(proc.pid, signal.CTRL_C_EVENT)
+        subprocess.Popen(["taskkill.exe", "/f", "/t", "/pid", str(proc.pid)])
 
 if __name__ == "__main__":
     args = sys.argv[1:]
