@@ -13,11 +13,15 @@ import json
 import string
 import logging
 import inspect
+import urllib
 
 sys.path.insert(1, "./lib")
 from zapv2 import ZAPv2
 
 log = logging.getLogger(__name__)
+
+class ZapCmdException(Exception):
+    pass
 
 class AutoFlush:
     def __init__(self, out):
@@ -105,6 +109,24 @@ def cut(s, w):
     return s
 
 
+taskkillexe = os.getenv("WINDIR").replace("\\", "/") + "/system32/taskkill.exe"
+
+def terminate_process_tree(pid=None, image=None):
+    try:
+        cmd = ["taskkill.exe", "/f", "/t"]
+        if pid is not None:
+            cmd.extend(("/pid", str(pid)))
+        else:
+            cmd.extend(("/im", image))
+        output = subprocess.check_output(cmd,
+                executable=taskkillexe,
+                shell=False,
+                stderr=subprocess.STDOUT)
+        log.info("Terminating: %s" % (output,))
+    except subprocess.CalledProcessError as ex:
+        log.info("Terminating: return code %d, %s" % (ex.returncode, ex.output))
+
+
 def pentest(owaspzap, target, httpUsername, httpPassword):
     # Configuration
     #browser='firefox'
@@ -117,17 +139,23 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
     zapProxyHost = '127.0.0.1'
     zapProxyPort = 8090
     zapProxy = "%s:%d" % (zapProxyHost, zapProxyPort)
-    log.info("Starting ZAP proxying on %s" % (zapProxy,))
-    proc = subprocess.Popen(["cmd.exe", "/c", owaspzap + "\\zap.bat",
-        "-daemon",
-        "-config", "api.disablekey=true",
-        "-config", "ajaxSpider.browserId=" + browser,
-        "-config", "selenium.phantomJsBinary=" + phantomJSPath,
-        "-host", zapProxyHost,
-        "-port", str(zapProxyPort),])
+    executable = os.getenv("JAVA_HOME") + "\\bin\\java.exe"
+    log.info("Starting ZAP proxying on %s with %s" % (zapProxy, executable,))
+    proc = subprocess.Popen([executable, "-jar", owaspzap + "\\zap-2.5.0.jar",
+            "-daemon",
+            "-config", "api.disablekey=true",
+            "-config", "ajaxSpider.browserId=" + browser,
+            "-config", "selenium.phantomJsBinary=" + phantomJSPath,
+            "-host", zapProxyHost,
+            "-port", str(zapProxyPort),], 
+        executable=executable.replace("\\", "/"),
+        shell=False,                        # Not using CMD lets us catch the PID of java.exe instead of CMD.EXE.
+                                            # When Cygwin shell terminated the native process CMD.EXE on Ctrl-C, 
+                                            # we lost track of the spawned java.exe.
+        cwd=owaspzap)
 
     try:
-        log.info("Waiting for ZAP to load.")
+        log.info("Waiting for ZAP to load in a process tree starting with pid " + str(proc.pid))
 
         # Wait until the ZAP API is reachable.
         zap = ZAPv2(proxies={"http": "http://%s" % (zapProxy,), "https": "http://%s" % (zapProxy,)})
@@ -141,7 +169,7 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
                 # Wait a bit more for ZAP to fully start.
                 log.info('Connected to ZAP version ' + version)
                 break
-        
+
         time.sleep(1)
 
         # https://groups.google.com/d/msg/zaproxy-users/BrVE0Zp_ug4/8PST56_-5nQJ
@@ -159,9 +187,13 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
         # zap.authentication.set_logged_out_indicator(cid, "Location: http\\.*/WebGoat/login\\.mvc|\\Qhref=\"login\\.mvc\"\\E|onload=\"document.loginForm.username.focus();\"")
         zap.authentication.set_logged_out_indicator(cid, "onload=\"document.loginForm.username.focus();\"")
         
-        userid = zap.users.new_user(cid, "guest")
-        zap.users.set_user_name(cid, userid, "guest")
-        zap.users.set_authentication_credentials(cid, userid, "username=guest&password=guest")
+        username = "guest"
+        password = "guest"
+        useridname = "guestid"
+        userid = zap.users.new_user(cid, useridname)
+        zap.users.set_user_name(cid, userid, username)
+        zap.users.set_authentication_credentials(cid, userid, "username=%s&password=%s" % ( urllib.quote(username), 
+            urllib.quote(password)))
         zap.users.set_user_enabled(cid, userid, True)
 
         zap.forcedUser.set_forced_user(cid, userid)
@@ -210,22 +242,28 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
         for result in zap.spider.results(scanid):
             log.info("Spider result: " + str(result))
 
+        log.info("Total of " + str(len(zap.core.urls)) + " URLs")
 
         # Start the AJAX spider.  TODO: use form authentication.
         log.info("AJAX %s spidering target %s" % (zap.ajaxSpider.option_browser_id, target,))
-        zap.ajaxSpider.scan(target)
+        zap.ajaxSpider.scan_as_user(ctxname, username, url=target)
 
         # Wait for AJAX spider to complete.
         while True:
             status = zap.ajaxSpider.status
             log.info('AJAX spider ' + status + ', number of results: ' + zap.ajaxSpider.number_of_results)
-            if status == 'stopped':
+            if status != 'stopped':
                 break
             time.sleep(1)
 
         log.info('AJAX Spider completed')
         # Give the AJAX spider some time to finish.
         time.sleep(3)
+
+        num_urls = len(zap.core.urls)
+        if (num_urls == 0):
+          raise ZapCmdException("No URLs found - is the target URL \"" + target + "\"accessible?")
+        log.info("Total of " + str(len(zap.core.urls)) + " URLs")
 
         for result in zap.ajaxSpider.results():
             bDetail = result["requestBody"]
@@ -258,10 +296,21 @@ def pentest(owaspzap, target, httpUsername, httpPassword):
         # Shutdown ZAP.
         zap.core.shutdown()
     finally:
-        log.info("Terminating PID " + str(proc.pid) + " and subprocesses")
-        # The Cygwin build of Python has no signal.CTRL_C_EVENT
-        # os.kill(proc.pid, signal.CTRL_C_EVENT)
-        subprocess.Popen(["taskkill.exe", "/f", "/t", "/pid", str(proc.pid)])
+        # Terminate the browser process spawned by ZAP daemon.
+        #
+        # Now that we spawn java.exe directly rather than through cmd.exe,
+        # Cygwin bash terminates java.exe on our pressing Ctrl-C, relieving us
+        # from having to clean up the process ourselves.
+        #
+        # Just in case any other error throws an exception, let's
+        # terminate java.exe quietly.
+        #
+        ## The Cygwin build of Python has no signal.CTRL_C_EVENT
+        ## os.kill(proc.pid, signal.CTRL_C_EVENT)
+        #
+        log.info("Terminating trees of %s.exe and PID %d" % (browser, proc.pid))
+        terminate_process_tree(image=browser + ".exe")
+        terminate_process_tree(pid=proc.pid)
 
 if __name__ == "__main__":
     args = sys.argv[1:]
@@ -288,5 +337,4 @@ if __name__ == "__main__":
         target = string.replace(target, '://', '://' + httpUsername + ':' + httpPassword + '@')
 
     pentest(owaspzap, target, httpUsername, httpPassword)
-
 
